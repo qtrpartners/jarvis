@@ -63,6 +63,16 @@ def artifact_prefix(job: str, run_id: str) -> str:
     return f"{_root()}/artifacts/{_component(job, 'job')}/{_component(run_id, 'run_id')}"
 
 
+def integration_prefix(probe: str, run_date: date, probe_id: str) -> str:
+    """Unique staging-integration partition for one synthetic probe run."""
+    safe_probe = _component(probe, "probe")
+    safe_probe_id = _component(probe_id, "probe_id")
+    return (
+        f"{_root()}/integration/{safe_probe}/dt={run_date.isoformat()}"
+        f"/probe_id={safe_probe_id}"
+    )
+
+
 def dataset_glob(kind: str, *parts: str) -> str:
     """A glob spanning every partition, for DuckDB or pandas.
 

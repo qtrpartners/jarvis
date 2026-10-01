@@ -335,15 +335,16 @@ output "identities" {
 
 output "github_oidc" {
   value = {
-    workload_identity_provider = google_iam_workload_identity_pool_provider.github.name
-    ci_service_account         = google_service_account.roles["ci"].email
-    recovery_service_account   = google_service_account.roles["recovery"].email
-    repository                 = var.github_repository
-    repository_id              = var.github_repository_id
-    repository_owner_id        = var.github_repository_owner_id
-    environment                = var.github_environment
-    ref                        = var.github_ref
-    attribute_condition        = google_iam_workload_identity_pool_provider.github.attribute_condition
+    workload_identity_provider  = google_iam_workload_identity_pool_provider.github.name
+    ci_service_account          = google_service_account.roles["ci"].email
+    recovery_service_account    = google_service_account.roles["recovery"].email
+    integration_service_account = google_service_account.roles["integration"].email
+    repository                  = var.github_repository
+    repository_id               = var.github_repository_id
+    repository_owner_id         = var.github_repository_owner_id
+    environment                 = var.github_environment
+    ref                         = var.github_ref
+    attribute_condition         = google_iam_workload_identity_pool_provider.github.attribute_condition
   }
 }
 
@@ -377,8 +378,9 @@ output "iam_contract" {
           google_project_iam_member.shared_bigquery_job_user["notebook"].role,
         ] : [],
       ))
-      ci       = []
-      recovery = var.env == "prod" ? [] : sort(tolist(local.recovery_project_roles))
+      ci          = []
+      recovery    = var.env == "prod" ? [] : sort(tolist(local.recovery_project_roles))
+      integration = var.env == "stage" ? [google_project_iam_member.integration_cloud_run[0].role] : []
     }
     resource_roles = {
       control = sort([
@@ -409,6 +411,10 @@ output "iam_contract" {
         google_storage_bucket_iam_member.recovery_data_canary[0].role,
         google_storage_bucket_iam_member.recovery_evidence[0].role,
       ])
+      integration = var.env == "stage" ? sort([
+        google_storage_bucket_iam_member.integration_data[0].role,
+        google_storage_bucket_iam_member.integration_logs[0].role,
+      ]) : []
     }
     workload_attachments = {
       control  = google_compute_instance.control.service_account[0].email

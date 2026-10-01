@@ -15,6 +15,6 @@ concurrency:
 jobs:
   validation:
     name: centralized validation
-    uses: joshuamyers22/jarvis-automation/.github/workflows/jarvis-ci.yml@7f92350563685092549b651bdeed4ad1d38e46c5
+    uses: qtrpartners/jarvis-automation/.github/workflows/jarvis-ci.yml@b60d42913edbd65c1c2b2f231c24540d4684216e
     permissions:
       contents: read

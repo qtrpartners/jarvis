@@ -1,8 +1,8 @@
 name: release
 
-# A release can begin only after the read-only CI workflow succeeds on main.
-# workflow_run is privileged, so the job also checks the originating event,
-# repository, branch, and conclusion before entering the protected environment.
+# Build the GCP release candidate exactly once after read-only CI succeeds on
+# main. Every test, attestation, signature, and later promotion consumes the
+# resulting registry digest; no downstream workflow rebuilds this commit.
 on:
   workflow_run:
     workflows: ["ci"]
@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   publish:
-    name: publish ${{ matrix.cloud }} image
+    name: build, test, attest, and sign GCP image
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
@@ -27,15 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        cloud: [gcp, aws, azure]
     permissions:
       contents: read
       id-token: write
+      attestations: write
     env:
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      RELEASE_REF: refs/heads/main
 
     steps:
       - name: Check out the validated commit
@@ -52,80 +50,172 @@ jobs:
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ -z "$(git status --porcelain)" ]]
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Resolve image name
+      - name: Require the GCP publication boundary
         id: image
         shell: bash
         env:
           GCP_IMAGE: ${{ vars.GCP_IMAGE }}
-          AWS_IMAGE: ${{ vars.AWS_IMAGE }}
-          AZURE_IMAGE: ${{ vars.AZURE_IMAGE }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_CI_SERVICE_ACCOUNT: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
-          case "${{ matrix.cloud }}" in
-            gcp) image="$GCP_IMAGE" ;;
-            aws) image="$AWS_IMAGE" ;;
-            azure) image="$AZURE_IMAGE" ;;
-            *) exit 2 ;;
-          esac
-          echo "image=$image" >> "$GITHUB_OUTPUT"
+          for name in GCP_IMAGE GCP_PROJECT_ID GCP_WIF_PROVIDER GCP_CI_SERVICE_ACCOUNT; do
+            [[ -n "${!name}" ]] || {
+              echo "production environment variable ${name} is required" >&2
+              exit 1
+            }
+          done
+          [[ "$GCP_IMAGE" =~ ^[a-z0-9-]+-docker\.pkg\.dev/[a-z][a-z0-9-]{4,28}[a-z0-9]/[a-z0-9._-]+/[a-z0-9._/-]+$ ]]
+          [[ "$GCP_IMAGE" == *".pkg.dev/${GCP_PROJECT_ID}/"* ]]
+          [[ "$GCP_IMAGE" != *"@"* && "$GCP_IMAGE" != *":"* ]]
+          echo "image=$GCP_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "registry=${GCP_IMAGE%%/*}" >> "$GITHUB_OUTPUT"
 
-      # Provider login is skipped until that provider has an explicitly
-      # configured image target. Every configured path uses keyless OIDC.
       - name: Authenticate to GCP with OIDC
-        if: matrix.cloud == 'gcp' && steps.image.outputs.image != ''
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
 
-      - name: Authenticate to AWS with OIDC
-        if: matrix.cloud == 'aws' && steps.image.outputs.image != ''
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
-        with:
-          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Authenticate to Azure with OIDC
-        if: matrix.cloud == 'azure' && steps.image.outputs.image != ''
-        uses: azure/login@935127ca5bb3c4b02c9c2c10060028383878f33f # v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Log in to the configured registry
-        if: steps.image.outputs.image != ''
+      - name: Log in to Artifact Registry
         shell: bash
         env:
-          IMAGE: ${{ steps.image.outputs.image }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          host="${IMAGE%%/*}"
-          case "${{ matrix.cloud }}" in
-            gcp) gcloud auth configure-docker "$host" --quiet ;;
-            aws) aws ecr get-login-password --region "$AWS_REGION" \
-              | docker login --username AWS --password-stdin "$host" ;;
-            azure) az acr login --name "${host%%.*}" ;;
-            *) exit 2 ;;
-          esac
+          REGISTRY: ${{ steps.image.outputs.registry }}
+        run: gcloud auth configure-docker "$REGISTRY" --quiet
 
-      - name: Build and publish the validated commit
-        if: steps.image.outputs.image != ''
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build and publish the validated GCP image once
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/Dockerfile
           push: true
+          pull: true
           build-args: |
-            CLOUD=${{ matrix.cloud }}
+            CLOUD=gcp
             VCS_REF=${{ env.RELEASE_SHA }}
           tags: ${{ steps.image.outputs.image }}:${{ env.RELEASE_SHA }}
-          # A privileged release never consumes a pull-request cache.
-          cache-from: type=gha,scope=release-${{ matrix.cloud }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.cloud }}
-          provenance: mode=max
-          sbom: true
+          cache-from: type=gha,scope=release-gcp
+          cache-to: type=gha,mode=max,scope=release-gcp
+          provenance: false
+          sbom: false
+
+      - name: Verify and pull the immutable build result
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p evidence
+          printf '%s\n' "$IMAGE@$DIGEST" > evidence/image-reference.txt
+          docker pull "$IMAGE@$DIGEST"
+
+      - name: Smoke every runtime role by digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          scripts/smoke-image.sh "$IMAGE@$DIGEST" gcp | tee evidence/smoke.log
+
+      - name: Generate SPDX SBOM from the tested digest
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: evidence/sbom.spdx.json
+
+      - name: Enforce the image vulnerability policy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.image }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: json
+          output: evidence/trivy.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Sign and verify the tested digest with keyless identity
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            --output json \
+            "$IMAGE@$DIGEST" > evidence/cosign-verification.json
+
+      - name: Create signed build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create the release evidence manifest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          ATTESTATION_URL: ${{ steps.provenance.outputs.attestation-url }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" evidence/provenance.sigstore.json
+          python scripts/release_evidence.py \
+            --image "$IMAGE" \
+            --digest "$DIGEST" \
+            --commit "$RELEASE_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_REF" \
+            --workflow .github/workflows/release.yml \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --lockfile uv.lock \
+            --dockerfile docker/Dockerfile \
+            --sbom evidence/sbom.spdx.json \
+            --provenance-bundle evidence/provenance.sigstore.json \
+            --signature-verification evidence/cosign-verification.json \
+            --smoke-log evidence/smoke.log \
+            --scan-report evidence/trivy.json \
+            --attestation-url "$ATTESTATION_URL" \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --output evidence/release.json
+
+      - name: Retain complete P4.2 release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gcp-release-${{ env.RELEASE_SHA }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retain partial evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gcp-release-failure-${{ env.RELEASE_SHA }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30

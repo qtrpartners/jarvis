@@ -21,6 +21,10 @@ lockfile, image scan, smoke-test, and release evidence together.
 The runtime image records the full Git revision and base-image digest as OCI
 labels. Production release evidence must record the resulting image digest;
 Git tags and image tags are discovery aids, not immutable deployment identity.
+The build-once release manifest also records SHA-256 hashes for `uv.lock`, the
+Dockerfile, SPDX SBOM, Sigstore provenance bundle, cosign verification output,
+smoke log, and vulnerability report. Staging and production consume its digest
+and never rebuild the source commit.
 
 Dependency automation may propose newer tags, but a maintainer must resolve the
 corresponding digest and run the complete clean-build and five-role smoke test

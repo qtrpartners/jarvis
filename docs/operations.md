@@ -107,10 +107,14 @@ The CLI rejects dirty trees so image contents correspond to the tag. CI builds
 and scans each provider image without cloud access. A separate release workflow
 runs only after CI succeeds for a push to this repository's `main`, enters the
 protected `production` environment, checks out the exact validated SHA, and uses
-keyless OIDC to publish that immutable tag. Registry publishing is skipped until
-the corresponding protected environment variables are configured. Follow the
+keyless OIDC to build and publish one GCP image, test its digest, create its
+SBOM and provenance, sign it, and retain release evidence. The release fails
+closed until all required protected GCP variables are configured. Follow the
 [CI and release trust-boundary runbook](release-automation.md) when changing
 workflow permissions, triggers, environments, or cloud federation.
+Use the [staging integration gate](staging-integration.md) to accept that exact
+digest before promotion; the gate exercises both a marked successful partition
+and a loud controlled failure using an ephemeral staging Cloud Run Job.
 
 ## Access
 

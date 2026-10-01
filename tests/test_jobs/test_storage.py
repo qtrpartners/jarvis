@@ -14,6 +14,9 @@ def test_path_layout_is_hive_partitioned():
         "/raw/vendor/ohlcv_hourly/dt=2026-08-11"
     )
     assert storage.derived_prefix("daily_pnl", d).endswith("/derived/daily_pnl/dt=2026-08-11")
+    assert storage.integration_prefix("staging_probe", d, "probe-123").endswith(
+        "/integration/staging_probe/dt=2026-08-11/probe_id=probe-123"
+    )
 
 
 def test_glob_spans_all_partitions():
@@ -60,3 +63,9 @@ def test_missing_glob_raises():
 def test_path_components_cannot_escape_the_storage_root(component: str):
     with pytest.raises(ValueError, match="invalid dataset"):
         storage.derived_prefix(component, date(2026, 8, 11))
+
+
+@pytest.mark.parametrize("component", ["../escape", "nested/path", "", ".", ".."])
+def test_integration_probe_ids_cannot_escape_the_storage_root(component: str):
+    with pytest.raises(ValueError, match="invalid probe_id"):
+        storage.integration_prefix("staging_probe", date(2026, 8, 11), component)

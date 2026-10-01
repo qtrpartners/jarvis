@@ -5,7 +5,7 @@ owner_type = "Organization"
 evidence_retention_days = 90
 
 [apps.ci_reader]
-name = "jarvis-ci-reader"
+name = "qtrpartners-jarvis-ci-reader"
 app_id_variable = "JARVIS_CI_READER_APP_ID"
 private_key_secret = "JARVIS_CI_READER_PRIVATE_KEY"
 repository_selection = "selected"
@@ -16,7 +16,7 @@ contents = "read"
 metadata = "read"
 
 [apps.release_bot]
-name = "jarvis-release-bot"
+name = "qtrpartners-jarvis-release-bot"
 app_id_variable = "JARVIS_RELEASE_BOT_APP_ID"
 private_key_secret = "JARVIS_RELEASE_BOT_PRIVATE_KEY"
 repository_selection = "selected"

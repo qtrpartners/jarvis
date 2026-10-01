@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -97,6 +101,10 @@ class GitHubAPI:
             raise BoundaryError("GITHUB_APP_TOKEN is required")
         self.token = token
         self.api_url = api_url.rstrip("/")
+        parsed_api_url = urllib.parse.urlparse(self.api_url)
+        if parsed_api_url.scheme != "https" or not parsed_api_url.netloc:
+            raise BoundaryError("GitHub API URL must be an absolute HTTPS URL")
+        self.api_origin = (parsed_api_url.scheme, parsed_api_url.netloc)
 
     def get(self, path_or_url: str) -> tuple[Any, dict[str, str]]:
         url = (
@@ -104,6 +112,9 @@ class GitHubAPI:
             if path_or_url.startswith("https://")
             else f"{self.api_url}/{path_or_url.lstrip('/')}"
         )
+        parsed_url = urllib.parse.urlparse(url)
+        if (parsed_url.scheme, parsed_url.netloc) != self.api_origin:
+            raise BoundaryError("refusing to send a GitHub credential to another origin")
         request = urllib.request.Request(
             url,
             headers={
@@ -145,6 +156,41 @@ def _next_link(header: str) -> str:
     return ""
 
 
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def create_app_jwt(app_id: str, private_key: str) -> str:
+    if not app_id.isdigit():
+        raise BoundaryError("GITHUB_APP_ID must be numeric")
+    if "BEGIN RSA PRIVATE KEY" not in private_key and "BEGIN PRIVATE KEY" not in private_key:
+        raise BoundaryError("GITHUB_APP_PRIVATE_KEY is not a PEM private key")
+
+    now = int(time.time())
+    header = _base64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    payload = _base64url(json.dumps({"iat": now - 60, "exp": now + 540, "iss": app_id}).encode())
+    signing_input = f"{header}.{payload}".encode()
+
+    key_path = ""
+    try:
+        descriptor, key_path = tempfile.mkstemp(prefix="jarvis-app-key-")
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(private_key)
+        result = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", key_path],
+            input=signing_input,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise BoundaryError("failed to sign the GitHub App JWT") from error
+    finally:
+        if key_path:
+            Path(key_path).unlink(missing_ok=True)
+    return f"{header}.{payload}.{_base64url(result.stdout)}"
+
+
 def validate_observation(
     *,
     principal: str,
@@ -162,6 +208,10 @@ def validate_observation(
         raise BoundaryError(f"{principal} is installed on {observed_owner!r}, expected {owner!r}")
     if installation.get("repository_selection") != app["repository_selection"]:
         raise BoundaryError(f"{principal} is not restricted to selected repositories")
+    if installation.get("app_slug") != app["name"]:
+        raise BoundaryError(
+            f"{principal} App slug is {installation.get('app_slug')!r}, expected {app['name']!r}"
+        )
 
     observed_permissions = installation.get("permissions")
     if not isinstance(observed_permissions, dict):
@@ -206,20 +256,26 @@ def audit(
     principal: str,
     owner: str,
     token: str,
+    app_id: str,
+    private_key: str,
+    installation_id: str,
     contract_path: Path = DEFAULT_CONTRACT,
     api_url: str = DEFAULT_API_URL,
 ) -> dict[str, Any]:
     contract = load_contract(contract_path)
     if principal not in PRINCIPALS:
         raise BoundaryError(f"unknown principal {principal!r}")
-    api = GitHubAPI(token, api_url)
-    owner_record, _ = api.get(f"/users/{urllib.parse.quote(owner, safe='')}")
+    if not installation_id.isdigit():
+        raise BoundaryError("GITHUB_APP_INSTALLATION_ID must be numeric")
+    token_api = GitHubAPI(token, api_url)
+    app_api = GitHubAPI(create_app_jwt(app_id, private_key), api_url)
+    owner_record, _ = token_api.get(f"/users/{urllib.parse.quote(owner, safe='')}")
     if not isinstance(owner_record, dict):
         raise BoundaryError("unexpected owner response")
-    installation, _ = api.get("/installation")
+    installation, _ = app_api.get(f"/app/installations/{installation_id}")
     if not isinstance(installation, dict):
-        raise BoundaryError("unexpected /installation response")
-    repositories = api.installation_repositories()
+        raise BoundaryError("unexpected App installation response")
+    repositories = token_api.installation_repositories()
     return validate_observation(
         principal=principal,
         owner=owner,
@@ -247,6 +303,9 @@ def main(argv: list[str] | None = None) -> int:
             principal=args.principal,
             owner=args.owner,
             token=os.environ.get("GITHUB_APP_TOKEN", ""),
+            app_id=os.environ.get("GITHUB_APP_ID", ""),
+            private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
+            installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", ""),
             contract_path=args.contract,
             api_url=args.api_url,
         )

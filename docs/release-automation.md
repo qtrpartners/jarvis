@@ -10,7 +10,7 @@ image.
 | Workflow | Trigger | Authority | Result |
 |---|---|---|---|
 | `ci.yml` | Pull request and push to `main` | Read-only repository token; no environment, secret, or OIDC permission | Calls the centralized validation workflow at an immutable revision |
-| `release.yml` | Successful completion of `ci` for a push to this repository's `main` branch | Read-only repository token plus OIDC inside the protected `production` environment | Immutable Git-SHA image publication for each configured provider |
+| `release.yml` | Successful completion of `ci` for a push to this repository's `main` branch | Read-only repository token, attestation authority, and OIDC inside the protected `production` environment | One tested, signed, immutable GCP image plus retained release evidence |
 | `recovery-drill.yml` | Schedule or explicit dispatch | Staging OIDC inside the protected `staging` environment | Isolated quarterly recovery evidence; never image publication |
 
 The release workflow checks the CI conclusion, original event, branch, and
@@ -20,10 +20,38 @@ exact 40-character commit locally, and tags the image with the same SHA.
 Validation and release use separate BuildKit cache scopes so an untrusted pull
 request cannot populate a cache consumed by a privileged build.
 
+## Build-once GCP release
+
+P4.2 publishes only the GCP image. AWS and Azure stay in credential-free CI
+validation until their production release paths have equivalent identity and
+registry controls. The release job fails closed when any required GCP variable
+is absent or when `GCP_IMAGE` is not an untagged Artifact Registry repository in
+the configured project.
+
+The job invokes `docker/build-push-action` exactly once. Every subsequent step
+uses its `sha256` output:
+
+1. pull the published image by digest and run every runtime smoke role;
+2. create an SPDX JSON SBOM from that exact digest;
+3. reject fixed HIGH or CRITICAL vulnerabilities and detected secrets;
+4. sign the digest with cosign's GitHub Actions keyless identity and verify the
+   signature against this workflow's exact identity;
+5. create GitHub/Sigstore build provenance and publish it as an OCI
+   attestation; and
+6. retain a 90-day evidence artifact containing the digest, commit, base-image
+   digest, lockfile and Dockerfile hashes, SBOM, provenance bundle, signature
+   verification, smoke log, and vulnerability report.
+
+`scripts/release_evidence.py` independently validates those inputs before it
+writes `release.json`. A failed smoke test, malformed digest, missing
+attestation, or blocked vulnerability cannot produce passing release evidence.
+Downstream staging and promotion workflows must consume
+`image.reference` from that manifest and must never rebuild the source commit.
+
 ## Centralized validation
 
 Stable validation logic lives in the public, credential-free
-[`joshuamyers22/jarvis-automation`](https://github.com/joshuamyers22/jarvis-automation)
+[`qtrpartners/jarvis-automation`](https://github.com/qtrpartners/jarvis-automation)
 repository. GitHub permits a public caller such as Jarvis to use reusable
 workflows only from public repositories, so confidentiality cannot be the access
 boundary. Instead, the called workflow hard-fails unless `github.repository` is
@@ -98,13 +126,10 @@ Provider identifiers belong in protected environment variables, not secrets:
 | Provider | Environment variables |
 |---|---|
 | GCP | `GCP_IMAGE`, `GCP_PROJECT_ID`, `GCP_WIF_PROVIDER`, `GCP_CI_SERVICE_ACCOUNT` |
-| AWS | `AWS_IMAGE`, `AWS_REGION`, `AWS_CI_ROLE_ARN` |
-| Azure | `AZURE_IMAGE`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
 
-An empty provider image variable disables publication for that experimental
-provider. GCP is the initial production provider, so `GCP_IMAGE` and its three
-OIDC identifiers are required before claiming a functioning production release
-path.
+All four values are required. An empty value fails the release rather than
+silently producing a successful no-op. `GCP_IMAGE` must use
+`REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/IMAGE` form without a tag or digest.
 
 Cloud trust must independently bind the token to the exact organization,
 repository, numeric repository/owner identifiers where supported, the
@@ -118,8 +143,8 @@ The authoritative least-privilege contract is
 
 | App | Selected repositories | Repository permissions |
 |---|---|---|
-| `jarvis-ci-reader` | `jarvis` | Contents read; metadata read |
-| `jarvis-release-bot` | `jarvis-live` | Contents write; pull requests write; metadata read |
+| `qtrpartners-jarvis-ci-reader` | `jarvis` | Contents read; metadata read |
+| `qtrpartners-jarvis-release-bot` | `jarvis-live` | Contents write; pull requests write; metadata read |
 
 The Apps must be owned by the same GitHub organization that owns Jarvis. A
 personal App, an all-repositories installation, or an installation on any extra
@@ -132,10 +157,10 @@ Create and install the Apps in this order:
 
 1. Transfer or create `jarvis` and `jarvis-live` under the production
    organization. Do not register a personal substitute.
-2. In the organization's developer settings, register `jarvis-ci-reader` with
+2. In the organization's developer settings, register `qtrpartners-jarvis-ci-reader` with
    only repository `Contents: Read-only`; install it on selected repository
    `jarvis` only.
-3. Register a separate `jarvis-release-bot` with only repository
+3. Register a separate `qtrpartners-jarvis-release-bot` with only repository
    `Contents: Read and write` and `Pull requests: Read and write`; install it on
    selected repository `jarvis-live` only.
 4. Create the protected `github-app-audit` environment in Jarvis. Restrict it to
@@ -150,11 +175,12 @@ Create and install the Apps in this order:
    record. The workflow also runs quarterly and requires approval before it can
    read either key.
 
-`scripts/github_app_boundary.py` uses each short-lived token to inspect its own
-installation. It fails unless the owner is an organization, repository selection
-is `selected`, the complete installed-repository set exactly matches the
-contract, and the complete permission set is exact. The evidence contains App
-and installation metadata but never the token or private key.
+`scripts/github_app_boundary.py` uses a short-lived App JWT to inspect installation
+metadata and each short-lived installation token to enumerate repositories. It
+fails unless the owner is an organization, repository selection is `selected`,
+the complete installed-repository set exactly matches the contract, and the
+complete permission set is exact. The evidence contains App and installation
+metadata but never the token or private key.
 
 Rotate each private key at least quarterly and immediately after suspected
 exposure: generate a second key, replace only that App's protected environment
@@ -177,9 +203,19 @@ After the repository settings and GCP environment variables exist:
    `production` environment approval.
 4. Approve it as a different authorized reviewer and verify the registry tag is
    exactly that SHA.
-5. Confirm the cloud audit log records workload federation and no service-account
+5. Verify the retained `release.json` binds that SHA to the tested registry
+   digest, pinned base image, lockfile, SPDX SBOM, provenance bundle, verified
+   keyless signature, smoke log, and vulnerability report.
+6. Confirm the cloud audit log records workload federation and no service-account
    key or other long-lived credential was used.
 
-P4.1 stops at validated image publication. Building only once, signing the
-digest, retaining complete provenance, staging deployment, and production
-promotion are P4.2 through P4.4.
+P4.2 stops at one validated and signed image digest with retained evidence.
+Staging deployment and production promotion consume that digest in P4.3 and
+P4.4; neither phase is permitted to rebuild it.
+
+P4.3 is implemented by the protected `staging integration` workflow. It
+revalidates the retained manifest and keyless signature, runs the released DAG
+against an ephemeral staging Cloud Run Job, verifies its marked partition and
+remote logs, then proves a controlled execution fails the DAG without
+publishing a partition. Follow the [staging integration runbook](staging-integration.md)
+for identity, variables, cross-project registry access, evidence, and cleanup.

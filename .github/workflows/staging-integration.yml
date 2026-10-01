@@ -1,0 +1,188 @@
+name: staging integration
+
+# Consume the retained P4.2 subject; never rebuild it. workflow_run is
+# privileged, so the release manifest, source SHA, digest, and signature are
+# all revalidated before any staging credential is used.
+on:
+  workflow_run:
+    workflows: ["release"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Successful release workflow run ID to retest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: staging-integration
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: exercise staging success and controlled failure
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_run' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GCP_STAGING_PROJECT_ID: ${{ vars.GCP_STAGING_PROJECT_ID }}
+      GCP_STAGING_REGION: ${{ vars.GCP_STAGING_REGION }}
+      GCP_STAGING_DATA_URI: ${{ vars.GCP_STAGING_DATA_URI }}
+      GCP_STAGING_SCRATCH_URI: ${{ vars.GCP_STAGING_SCRATCH_URI }}
+      GCP_STAGING_AIRFLOW_LOGS_URI: ${{ vars.GCP_STAGING_AIRFLOW_LOGS_URI }}
+      GCP_STAGING_WIF_PROVIDER: ${{ vars.GCP_STAGING_WIF_PROVIDER }}
+      GCP_STAGING_INTEGRATION_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_INTEGRATION_SERVICE_ACCOUNT }}
+      GCP_STAGING_JOB_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_JOB_SERVICE_ACCOUNT }}
+
+    steps:
+      - name: Check out trusted resolver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Download retained P4.2 evidence
+        id: upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
+          MANUAL_RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          release_run_id="$AUTOMATIC_RUN_ID"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_run_id="$MANUAL_RUN_ID"
+          fi
+          [[ "$release_run_id" =~ ^[0-9]+$ ]]
+          echo "release_run_id=$release_run_id" >> "$GITHUB_OUTPUT"
+          mkdir -p upstream-evidence
+          gh run download "$release_run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'gcp-release-*' \
+            --dir upstream-evidence
+
+      - name: Resolve the one passing release subject
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/gcp_staging_integration.py resolve-release \
+            --evidence-dir upstream-evidence \
+            --repository "$GITHUB_REPOSITORY" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Check out the released source exactly
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.release_commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          version: "0.12.5"
+
+      - name: Install the released dependency set
+        run: uv sync --frozen --extra dev --extra gcp
+
+      - name: Require the staging boundary
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.release.outputs.image_reference }}
+        run: |
+          set -euo pipefail
+          required=(
+            GCP_STAGING_PROJECT_ID GCP_STAGING_REGION GCP_STAGING_DATA_URI
+            GCP_STAGING_SCRATCH_URI GCP_STAGING_AIRFLOW_LOGS_URI
+            GCP_STAGING_WIF_PROVIDER GCP_STAGING_INTEGRATION_SERVICE_ACCOUNT
+            GCP_STAGING_JOB_SERVICE_ACCOUNT
+          )
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || {
+              echo "staging environment variable ${name} is required" >&2
+              exit 1
+            }
+          done
+          [[ "$GCP_STAGING_PROJECT_ID" == *-stage ]]
+          [[ "$GCP_STAGING_INTEGRATION_SERVICE_ACCOUNT" == *@"$GCP_STAGING_PROJECT_ID".iam.gserviceaccount.com ]]
+          [[ "$GCP_STAGING_JOB_SERVICE_ACCOUNT" == *@"$GCP_STAGING_PROJECT_ID".iam.gserviceaccount.com ]]
+          [[ "$IMAGE_REFERENCE" =~ @sha256:[0-9a-f]{64}$ ]]
+
+      - name: Authenticate as the staging integration identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          project_id: ${{ env.GCP_STAGING_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_STAGING_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_STAGING_INTEGRATION_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          version: ">= 540.0.0"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Reverify the P4.2 signature by digest
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.release.outputs.image_reference }}
+        run: |
+          set -euo pipefail
+          registry="${IMAGE_REFERENCE%%/*}"
+          gcloud auth configure-docker "$registry" --quiet
+          mkdir -p staging-evidence
+          cosign verify \
+            --certificate-identity "https://github.com/qtrpartners/jarvis/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --output json \
+            "$IMAGE_REFERENCE" > staging-evidence/cosign-verification.json
+
+      - name: Run the staging DAG acceptance gate
+        shell: bash
+        env:
+          AIRFLOW_HOME: ${{ runner.temp }}/airflow-p43
+          IMAGE_REFERENCE: ${{ steps.release.outputs.image_reference }}
+        run: |
+          set -euo pipefail
+          logical_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          uv run python scripts/gcp_staging_integration.py run \
+            --project "$GCP_STAGING_PROJECT_ID" \
+            --region "$GCP_STAGING_REGION" \
+            --data-uri "$GCP_STAGING_DATA_URI" \
+            --scratch-uri "$GCP_STAGING_SCRATCH_URI" \
+            --airflow-logs-uri "$GCP_STAGING_AIRFLOW_LOGS_URI" \
+            --image-reference "$IMAGE_REFERENCE" \
+            --source-commit "${{ steps.release.outputs.release_commit }}" \
+            --release-run-id "${{ steps.upstream.outputs.release_run_id }}" \
+            --job-service-account "$GCP_STAGING_JOB_SERVICE_ACCOUNT" \
+            --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --logical-date "$logical_date" \
+            --evidence-dir staging-evidence
+
+      - name: Retain P4.3 acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: staging-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-evidence/
+          if-no-files-found: error
+          retention-days: 90

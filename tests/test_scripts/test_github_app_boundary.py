@@ -13,12 +13,16 @@ from scripts.github_app_boundary import (
 
 
 def installation(
-    *, permissions: dict[str, str], repositories: list[str], owner: str = "example-org"
+    *,
+    permissions: dict[str, str],
+    repositories: list[str],
+    app_slug: str,
+    owner: str = "example-org",
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     return (
         {
             "id": 123,
-            "app_slug": "example-app",
+            "app_slug": app_slug,
             "account": {"login": owner},
             "repository_selection": "selected",
             "permissions": permissions,
@@ -54,7 +58,7 @@ def test_contract_rejects_all_repository_installation() -> None:
 def test_observation_accepts_exact_reader_boundary() -> None:
     app = load_contract()["apps"]["ci_reader"]
     observed_installation, repositories = installation(
-        permissions=app["permissions"], repositories=app["repositories"]
+        permissions=app["permissions"], repositories=app["repositories"], app_slug=app["name"]
     )
 
     evidence = validate_observation(
@@ -73,7 +77,9 @@ def test_observation_accepts_exact_reader_boundary() -> None:
 def test_observation_rejects_extra_repository() -> None:
     app = load_contract()["apps"]["ci_reader"]
     observed_installation, repositories = installation(
-        permissions=app["permissions"], repositories=[*app["repositories"], "private-canary"]
+        permissions=app["permissions"],
+        repositories=[*app["repositories"], "private-canary"],
+        app_slug=app["name"],
     )
 
     with pytest.raises(BoundaryError, match="extra=.*private-canary"):
@@ -90,7 +96,7 @@ def test_observation_rejects_permission_expansion() -> None:
     app = load_contract()["apps"]["ci_reader"]
     permissions = {**app["permissions"], "issues": "write"}
     observed_installation, repositories = installation(
-        permissions=permissions, repositories=app["repositories"]
+        permissions=permissions, repositories=app["repositories"], app_slug=app["name"]
     )
 
     with pytest.raises(BoundaryError, match="permissions"):
@@ -106,7 +112,10 @@ def test_observation_rejects_permission_expansion() -> None:
 def test_observation_rejects_wrong_installation_owner() -> None:
     app = load_contract()["apps"]["release_bot"]
     observed_installation, repositories = installation(
-        permissions=app["permissions"], repositories=app["repositories"], owner="personal-user"
+        permissions=app["permissions"],
+        repositories=app["repositories"],
+        app_slug=app["name"],
+        owner="personal-user",
     )
 
     with pytest.raises(BoundaryError, match="expected 'example-org'"):
@@ -122,7 +131,7 @@ def test_observation_rejects_wrong_installation_owner() -> None:
 def test_observation_rejects_personal_owner() -> None:
     app = load_contract()["apps"]["ci_reader"]
     observed_installation, repositories = installation(
-        permissions=app["permissions"], repositories=app["repositories"]
+        permissions=app["permissions"], repositories=app["repositories"], app_slug=app["name"]
     )
 
     with pytest.raises(BoundaryError, match="expected an Organization"):

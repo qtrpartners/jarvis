@@ -81,7 +81,13 @@ def dispatch(
 
 
 @task(task_id="verify_output")
-def verify(kind: str, dataset: str, source: str | None = None, ds: str | None = None) -> dict:
+def verify(
+    kind: str,
+    dataset: str,
+    source: str | None = None,
+    ds: str | None = None,
+    probe_id: str | None = None,
+) -> dict:
     """Assert the partition exists, is marked complete, and is not empty.
 
     Provider-neutral: fsspec resolves gs://, s3:// and abfs:// identically, so
@@ -98,8 +104,14 @@ def verify(kind: str, dataset: str, source: str | None = None, ds: str | None = 
         if source is None:
             raise ValueError("raw partitions need a source")
         prefix = storage.raw_prefix(source, dataset, run_date)
-    else:
+    elif kind == "derived":
         prefix = storage.derived_prefix(dataset, run_date)
+    elif kind == "integration":
+        if probe_id is None:
+            raise ValueError("integration partitions need a probe_id")
+        prefix = storage.integration_prefix(dataset, run_date, probe_id)
+    else:
+        raise ValueError(f"unsupported partition kind: {kind}")
 
     if not storage.is_complete(prefix):
         raise AssertionError(f"partition is not marked complete: {prefix}")

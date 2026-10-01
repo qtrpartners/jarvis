@@ -61,7 +61,7 @@ run "least_privilege_identity_contract" {
   command = apply
 
   assert {
-    condition     = toset(keys(google_service_account.roles)) == toset(["deployer", "ci", "recovery", "control", "job", "feed", "notebook"])
+    condition     = toset(keys(google_service_account.roles)) == toset(["deployer", "ci", "recovery", "integration", "control", "job", "feed", "notebook"])
     error_message = "Every automation and runtime role must have a separate user-managed service account."
   }
 
@@ -172,6 +172,21 @@ run "least_privilege_identity_contract" {
       google_service_account_iam_member.recovery_act_as_control[0].role == "roles/iam.serviceAccountUser"
     )
     error_message = "Non-production recovery automation must use its own OIDC identity and may act only as control."
+  }
+
+  assert {
+    condition = (
+      length(google_service_account_iam_member.integration_workload_identity) == 0 &&
+      length(google_project_iam_custom_role.staging_integration) == 0 &&
+      length(google_project_iam_member.integration_cloud_run) == 0 &&
+      length(google_service_account_iam_member.integration_act_as_job) == 0 &&
+      length(google_storage_bucket_iam_member.integration_data) == 0 &&
+      length(google_project_iam_custom_role.staging_integration_logs) == 0 &&
+      length(google_storage_bucket_iam_member.integration_logs) == 0 &&
+      length(output.iam_contract.runtime_project_roles.integration) == 0 &&
+      length(output.iam_contract.resource_roles.integration) == 0
+    )
+    error_message = "Staging integration automation must receive no development permissions."
   }
 
   assert {
@@ -449,6 +464,40 @@ run "backup_retention_must_cover_pitr_window" {
   expect_failures = [google_sql_database_instance.airflow]
 }
 
+run "staging_integration_identity_is_narrow" {
+  command = apply
+
+  variables {
+    env                = "stage"
+    github_environment = "staging"
+  }
+
+  assert {
+    condition = (
+      length(google_service_account_iam_member.integration_workload_identity) == 1 &&
+      google_service_account_iam_member.integration_workload_identity[0].role == "roles/iam.workloadIdentityUser" &&
+      google_project_iam_member.integration_cloud_run[0].role == google_project_iam_custom_role.staging_integration[0].name &&
+      toset(google_project_iam_custom_role.staging_integration[0].permissions) == toset(["resourcemanager.projects.get", "run.executions.get", "run.executions.list", "run.jobs.create", "run.jobs.delete", "run.jobs.get", "run.jobs.run", "run.jobs.runWithOverrides", "run.locations.get", "run.operations.get"]) &&
+      google_service_account_iam_member.integration_act_as_job[0].service_account_id == google_service_account.roles["job"].name &&
+      google_service_account_iam_member.integration_act_as_job[0].role == "roles/iam.serviceAccountUser"
+    )
+    error_message = "Staging integration automation must use its own OIDC identity and may act only as the batch job."
+  }
+
+  assert {
+    condition = (
+      google_storage_bucket_iam_member.integration_data[0].role == "roles/storage.objectViewer" &&
+      strcontains(google_storage_bucket_iam_member.integration_data[0].condition[0].expression, "/objects/integration/staging_probe/") &&
+      google_storage_bucket_iam_member.integration_logs[0].role == google_project_iam_custom_role.staging_integration_logs[0].name &&
+      toset(google_project_iam_custom_role.staging_integration_logs[0].permissions) == toset(["storage.objects.create", "storage.objects.delete", "storage.objects.get", "storage.objects.list"]) &&
+      strcontains(google_storage_bucket_iam_member.integration_logs[0].condition[0].expression, "/objects/dag_id=staging_integration/") &&
+      length(output.iam_contract.runtime_project_roles.integration) == 1 &&
+      one(output.iam_contract.runtime_project_roles.integration) == google_project_iam_custom_role.staging_integration[0].name
+    )
+    error_message = "Integration automation may read only probe output and manage only its Airflow logs."
+  }
+}
+
 run "production_recovery_automation_is_disabled" {
   command = plan
 
@@ -466,6 +515,13 @@ run "production_recovery_automation_is_disabled" {
       length(google_service_account_iam_member.recovery_act_as_control) == 0 &&
       length(google_storage_bucket_iam_member.recovery_data_canary) == 0 &&
       length(google_storage_bucket_iam_member.recovery_evidence) == 0 &&
+      length(google_service_account_iam_member.integration_workload_identity) == 0 &&
+      length(google_project_iam_custom_role.staging_integration) == 0 &&
+      length(google_project_iam_member.integration_cloud_run) == 0 &&
+      length(google_service_account_iam_member.integration_act_as_job) == 0 &&
+      length(google_storage_bucket_iam_member.integration_data) == 0 &&
+      length(google_project_iam_custom_role.staging_integration_logs) == 0 &&
+      length(google_storage_bucket_iam_member.integration_logs) == 0 &&
       !output.recovery_contract.enabled &&
       !output.recovery_contract.production_access
     )

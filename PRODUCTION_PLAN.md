@@ -1,7 +1,7 @@
 # Jarvis production functionality plan
 
-Status: active — P4.1 and P4.1b complete locally; P4.1a implementation complete,
-live organization registration and acceptance evidence pending
+Status: active — P4.1, P4.1b, P4.2, and P4.3 complete locally; P4.1a complete with
+live organization registration and retained acceptance evidence
 Prepared: 2026-09-16
 Reference reviewed: [`sixtycapital/infrastructure`](https://github.com/sixtycapital/infrastructure/tree/b6da17b68b9a2be41dbfa616506b70e30ce62c6e), tag `3.4.1`
 
@@ -535,11 +535,12 @@ Exit gate:
 
 Goal: replace the reference's mutable daily rollout with auditable releases.
 
-Implementation status (2026-09-17): P4.1, P4.1a, and P4.1b are implemented and
-locally validated. The automation repository's no-bypass ruleset and policy
-workflow are live; Jarvis environment enforcement, the first approved release,
-the GitHub App registrations and boundary audit, and a live unauthorized-caller
-exercise remain evidence.
+Implementation status (2026-09-18): P4.1, P4.1b, P4.2, and P4.3 are implemented and
+locally validated; P4.1a also has passing live acceptance evidence. The
+automation repository's no-bypass ruleset and policy workflow are live. The
+first GCP build-once release requires a provisioned Artifact Registry and the
+four protected OIDC publication variables; a live unauthorized-caller exercise
+also remains evidence.
 
 - **P4.1 Separate validation from release — complete locally.** Pull requests and
   main-branch CI run unit, architecture, DAG, Terraform, Packer, image smoke,
@@ -552,19 +553,21 @@ exercise remain evidence.
   release cache namespaces are isolated. Repository policy tests enforce this
   split and full-SHA action pins; the runbook defines ruleset, environment,
   variable, cloud-claim, and live acceptance requirements.
-- **P4.1a Add cross-repository Apps — implemented locally; live acceptance
-  pending.** A versioned contract separates an organization-owned, contents-read
+- **P4.1a Add cross-repository Apps — complete.** A versioned contract separates
+  an organization-owned, contents-read
   CI reader installed only on `jarvis` from a contents-write/pull-request-write
   release bot installed only on `jarvis-live`. A protected manual and quarterly
   workflow mints short-lived tokens, rejects personal ownership, all-repository or
   extra installations, and permission drift, then retains secret-free evidence.
   The runbook covers registration, selected-repository installation, protected
   App IDs and private keys, one-key-at-a-time rotation, and quarterly review.
-  Creating the organization-owned Apps, installing them after the deferred
-  organization/repository move, and retaining the first passing live audit remain
-  required before marking the item complete.
+  Both Apps are owned by `qtrpartners`: the CI reader is installed only on
+  `jarvis`, and the release bot is installed only on `jarvis-live`. The first
+  passing live audit retained both secret-free evidence artifacts in
+  [run 35291343716](https://github.com/qtrpartners/jarvis/actions/runs/35291343716)
+  on 2026-09-18.
 - **P4.1b Centralize reusable automation — complete locally.** Stable validation
-  jobs now live in the public, credential-free `joshuamyers22/jarvis-automation`
+  jobs now live in the public, credential-free `qtrpartners/jarvis-automation`
   repository. Its reusable workflow accepts only the hardcoded Jarvis caller,
   declares no inputs or secrets, repeats read-only token permissions on every job,
   and has no environment, OIDC, registry-login, publishing, or deployment authority.
@@ -574,11 +577,31 @@ exercise remain evidence.
   Jarvis. The upstream repository enforces read-only default workflow permissions
   and a no-bypass `main` ruleset requiring pull requests, its passing policy check,
   and resolved review threads; a live denied-caller run remains evidence.
-- **P4.2 Build once.** Main-branch CI builds the GCP image, records its digest, creates
-  provenance and an SBOM, signs it with keyless identity, and stores test evidence.
-- **P4.3 Add staging integration tests.** Dispatch a synthetic Cloud Run Job, write a
-  partition and completion marker, verify Airflow remote logs, exercise a controlled
-  failure, and confirm the DAG fails loudly.
+- **P4.2 Build once — complete locally; live GCP acceptance pending.** After
+  successful read-only main CI, one protected job performs exactly one GCP
+  build-and-push and uses the resulting immutable digest for every later step.
+  It runs all runtime smoke roles by digest, creates an SPDX SBOM, enforces the
+  HIGH/CRITICAL vulnerability and secret policy, signs and verifies the digest
+  with the workflow's keyless Sigstore identity, and publishes signed build
+  provenance. A fail-closed manifest binds the commit, lockfile, Dockerfile,
+  pinned base image, digest, SBOM, provenance bundle, signature verification,
+  smoke log, and scan report; complete evidence is retained for 90 days and
+  partial failure evidence for 30. AWS and Azure remain validation-only. The
+  first live run requires the external GCP project, Artifact Registry, and
+  protected OIDC variables before this item can be marked live-complete.
+- **P4.3 Add staging integration tests — complete locally; live GCP acceptance
+  pending.** A protected workflow consumes the one retained P4.2 digest and
+  signature, checks out its exact source commit, and runs the real Airflow DAG
+  against a uniquely named ephemeral staging Cloud Run Job. The successful path
+  writes and verifies a synthetic partition, completion marker, minimum size,
+  and new remote Airflow logs. The controlled path raises an explicit probe
+  failure, requires `airflow dags test` to fail loudly, verifies no partition was
+  published, and confirms separate remote logs. A dedicated repository,
+  environment, and ref-bound OIDC identity has staging-only Cloud Run,
+  batch actAs, probe-read, and integration-log permissions; cleanup and
+  secret-free evidence retention are fail-closed. The first live pass requires
+  a provisioned staging project, the protected staging variables, access to the
+  P4.2 producer repository, and a successful P4.2 release artifact.
 - **P4.4 Promote with approval.** Production promotion requires the staging result,
   uses the same digest, records the operator and change, and verifies all deployed
   roles converge on that digest.

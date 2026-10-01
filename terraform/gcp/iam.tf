@@ -12,9 +12,10 @@ locals {
   }
 
   automation_service_accounts = {
-    deployer = "Terraform infrastructure and host-image deployment"
-    ci       = "GitHub Actions image publishing"
-    recovery = "Non-production recovery drill automation"
+    deployer    = "Terraform infrastructure and host-image deployment"
+    ci          = "GitHub Actions image publishing"
+    recovery    = "Non-production recovery drill automation"
+    integration = "Non-production staging integration automation"
   }
 
   recovery_project_roles = toset([
@@ -248,6 +249,56 @@ resource "google_service_account_iam_member" "recovery_workload_identity" {
   depends_on = [google_iam_workload_identity_pool_provider.github]
 }
 
+# Staging integration uses an identity separate from release publication and
+# recovery. Its grants exist only in staging, with no secret, database, VM,
+# backup, development, or production access.
+resource "google_service_account_iam_member" "integration_workload_identity" {
+  count = var.env == "stage" ? 1 : 0
+
+  service_account_id = google_service_account.roles["integration"].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository_id/${var.github_repository_id}"
+
+  depends_on = [google_iam_workload_identity_pool_provider.github]
+}
+
+resource "google_project_iam_custom_role" "staging_integration" {
+  count = var.env == "stage" ? 1 : 0
+
+  project     = var.project_id
+  role_id     = "jarvisStagingIntegration"
+  title       = "Jarvis Staging Integration"
+  description = "Create, execute, observe, and delete ephemeral Cloud Run integration jobs."
+  permissions = [
+    "resourcemanager.projects.get",
+    "run.executions.get",
+    "run.executions.list",
+    "run.jobs.create",
+    "run.jobs.delete",
+    "run.jobs.get",
+    "run.jobs.run",
+    "run.jobs.runWithOverrides",
+    "run.locations.get",
+    "run.operations.get",
+  ]
+}
+
+resource "google_project_iam_member" "integration_cloud_run" {
+  count = var.env == "stage" ? 1 : 0
+
+  project = var.project_id
+  role    = google_project_iam_custom_role.staging_integration[0].name
+  member  = "serviceAccount:${google_service_account.roles["integration"].email}"
+}
+
+resource "google_service_account_iam_member" "integration_act_as_job" {
+  count = var.env == "stage" ? 1 : 0
+
+  service_account_id = google_service_account.roles["job"].name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.roles["integration"].email}"
+}
+
 resource "google_project_iam_member" "recovery" {
   for_each = var.env == "prod" ? toset([]) : local.recovery_project_roles
 
@@ -315,6 +366,52 @@ resource "google_storage_bucket_iam_member" "control_logs" {
   bucket = google_storage_bucket.airflow_logs.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.roles["control"].email}"
+}
+
+# The runner reads only synthetic integration partitions and writes only the
+# integration DAG's Airflow logs. The batch job identity remains the writer of
+# partition data and completion markers.
+resource "google_storage_bucket_iam_member" "integration_data" {
+  count = var.env == "stage" ? 1 : 0
+
+  bucket = google_storage_bucket.data.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.roles["integration"].email}"
+
+  condition {
+    title       = "staging-integration-results"
+    description = "Permit staging integration automation to inspect only synthetic probe output."
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.data.name}/objects/integration/staging_probe/\")"
+  }
+}
+
+resource "google_project_iam_custom_role" "staging_integration_logs" {
+  count = var.env == "stage" ? 1 : 0
+
+  project     = var.project_id
+  role_id     = "jarvisStagingIntegrationLogs"
+  title       = "Jarvis Staging Integration Logs"
+  description = "Discover and manage the staging integration DAG's remote task logs."
+  permissions = [
+    "storage.objects.create",
+    "storage.objects.delete",
+    "storage.objects.get",
+    "storage.objects.list",
+  ]
+}
+
+resource "google_storage_bucket_iam_member" "integration_logs" {
+  count = var.env == "stage" ? 1 : 0
+
+  bucket = google_storage_bucket.airflow_logs.name
+  role   = google_project_iam_custom_role.staging_integration_logs[0].name
+  member = "serviceAccount:${google_service_account.roles["integration"].email}"
+
+  condition {
+    title       = "staging-integration-airflow-logs"
+    description = "Permit bucket listing for log discovery and object access only to the integration DAG prefix."
+    expression  = "resource.name == \"projects/_/buckets/${google_storage_bucket.airflow_logs.name}\" || resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.airflow_logs.name}/objects/dag_id=staging_integration/\")"
+  }
 }
 
 # --- job: read and write data ------------------------------------------------
