@@ -191,6 +191,6 @@ def test_github_app_audit_uses_separate_protected_credentials() -> None:
         assert f"--principal {principal}" in source
 
     assert (
-        "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
         in source
     )
