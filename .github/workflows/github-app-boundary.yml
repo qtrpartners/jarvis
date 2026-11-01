@@ -47,7 +47,7 @@ jobs:
           --principal ci_reader
           --evidence evidence/ci-reader.json
       - name: Retain CI reader audit evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: github-app-ci-reader-boundary
           path: evidence/ci-reader.json
@@ -89,7 +89,7 @@ jobs:
           --principal release_bot
           --evidence evidence/release-bot.json
       - name: Retain release bot audit evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: github-app-release-bot-boundary
           path: evidence/release-bot.json
